@@ -1,4 +1,3 @@
-import math
 import multiprocessing
 import random
 from struct import pack, unpack
@@ -152,26 +151,25 @@ class Vp8Decoder:
                     break
                 assert img.fmt == lib.VPX_IMG_FMT_I420
 
-                o_buf = bytearray(math.ceil(img.d_w * img.d_h * 12 / 8))
-                o_pos = 0
+                frame = VideoFrame(width=img.d_w, height=img.d_h)
+                frame.pts = encoded_frame.timestamp
+                frame.time_base = VIDEO_TIME_BASE
+
                 for p in range(3):
                     i_stride = img.stride[p]
                     i_buf = ffi.buffer(img.planes[p], i_stride * img.d_h)
                     i_pos = 0
 
+                    o_stride = frame.planes[p].line_size
+                    o_buf = memoryview(frame.planes[p])
+                    o_pos = 0
+
                     div = p and 2 or 1
-                    o_stride = img.d_w // div
                     for r in range(0, img.d_h // div):
                         o_buf[o_pos:o_pos + o_stride] = i_buf[i_pos:i_pos + o_stride]
                         i_pos += i_stride
                         o_pos += o_stride
 
-                frame = VideoFrame(
-                    width=img.d_w,
-                    height=img.d_h,
-                    data=bytes(o_buf))
-                frame.pts = encoded_frame.timestamp
-                frame.time_base = VIDEO_TIME_BASE
                 frames.append(frame)
 
         return frames
@@ -193,11 +191,6 @@ class Vp8Encoder:
             lib.vpx_codec_destroy(self.codec)
 
     def encode(self, frame, force_keyframe=False):
-        image = ffi.new('vpx_image_t *')
-
-        lib.vpx_img_wrap(image, lib.VPX_IMG_FMT_I420,
-                         frame.width, frame.height, 1, frame.data)
-
         if self.codec and (frame.width != self.cfg.g_w or frame.height != self.cfg.g_h):
             lib.vpx_codec_destroy(self.codec)
             self.codec = None
@@ -225,6 +218,17 @@ class Vp8Encoder:
             self.cfg.kf_max_dist = 600
             _vpx_assert(lib.vpx_codec_enc_init(self.codec, self.cx, self.cfg, 0))
 
+        # setup image
+        if frame.format.name != 'yuv420p':
+            frame = frame.reformat(format='yuv420p')
+        image = ffi.new('vpx_image_t *')
+        lib.vpx_img_wrap(image, lib.VPX_IMG_FMT_I420,
+                         frame.width, frame.height, 1, ffi.NULL)
+        for p in range(3):
+            image.planes[p] = ffi.cast('void*', frame.planes[p].buffer_ptr)
+            image.stride[p] = frame.planes[p].line_size
+
+        # encode frame
         flags = 0
         if force_keyframe:
             flags |= lib.VPX_EFLAG_FORCE_KF
